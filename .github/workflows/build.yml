@@ -174,6 +174,16 @@ jobs:
         with:
           target-dir: /var/lib/containers
 
+      - name: Setup Podman and Docker
+        run: |
+          echo "Setting up container runtime environment..."
+          sudo systemctl start podman || true
+          sudo systemctl start docker || true
+          
+          # Configure Docker to use Podman socket (fallback)
+          sudo usermod -a -G podman runner || true
+          sudo chmod 666 /var/run/podman/podman.sock || true
+
       - name: Cache Buildah layers
         uses: actions/cache@v3
         with:
@@ -268,38 +278,137 @@ jobs:
             echo "No artifact.tar found, continuing without docs"
           fi
 
-      - name: Pull base images with retry
-        uses: Wandalen/wretry.action@v3.8.0
-        with:
-          attempt_limit: 3
-          attempt_delay: 15000
-          command: |
-            set -e
-            echo "Pulling base image..."
-            sudo podman pull "${{ env.PULL_IMAGE_REGISTRY }}/${{ matrix.base_image_name }}-${{ matrix.base_image_flavor }}:${{ matrix.fedora_version }}"
+      - name: Pre-check image availability
+        id: image-check
+        run: |
+          set -e
+          echo "🔍 Checking availability of required container images..."
+          
+          BASE_IMAGE="${{ env.PULL_IMAGE_REGISTRY }}/${{ matrix.base_image_name }}-${{ matrix.base_image_flavor }}:${{ matrix.fedora_version }}"
+          AKMODS_IMAGE="${{ env.PULL_IMAGE_REGISTRY }}/akmods:${{ matrix.kernel_flavor}}-${{ matrix.fedora_version }}-${{ matrix.kernel_version }}"
+          NVIDIA_AKMODS_IMAGE="${{ env.PULL_IMAGE_REGISTRY }}/akmods-${{ matrix.target_nvidia_flavor }}:${{ matrix.kernel_flavor}}-${{ matrix.fedora_version }}-${{ matrix.kernel_version }}"
+          
+          echo "Checking: $BASE_IMAGE"
+          if skopeo inspect "docker://$BASE_IMAGE" > /dev/null 2>&1; then
+            echo "✅ Base image available: $BASE_IMAGE"
+            BASE_AVAILABLE=true
+          else
+            echo "❌ Base image NOT available: $BASE_IMAGE"
+            BASE_AVAILABLE=false
+          fi
+          
+          echo "Checking: $AKMODS_IMAGE"
+          if skopeo inspect "docker://$AKMODS_IMAGE" > /dev/null 2>&1; then
+            echo "✅ Akmods image available: $AKMODS_IMAGE"
+            AKMODS_AVAILABLE=true
+          else
+            echo "❌ Akmods image NOT available: $AKMODS_IMAGE"
+            AKMODS_AVAILABLE=false
+          fi
+          
+          echo "Checking: $NVIDIA_AKMODS_IMAGE"
+          if skopeo inspect "docker://$NVIDIA_AKMODS_IMAGE" > /dev/null 2>&1; then
+            echo "✅ NVIDIA akmods image available: $NVIDIA_AKMODS_IMAGE"
+            NVIDIA_AVAILABLE=true
+          else
+            echo "❌ NVIDIA akmods image NOT available: $NVIDIA_AKMODS_IMAGE"
+            NVIDIA_AVAILABLE=false
+          fi
+          
+          # Set outputs
+          echo "base-available=$BASE_AVAILABLE" >> $GITHUB_OUTPUT
+          echo "akmods-available=$AKMODS_AVAILABLE" >> $GITHUB_OUTPUT
+          echo "nvidia-available=$NVIDIA_AVAILABLE" >> $GITHUB_OUTPUT
+          
+          if [ "$BASE_AVAILABLE" = "true" ] && [ "$AKMODS_AVAILABLE" = "true" ] && [ "$NVIDIA_AVAILABLE" = "true" ]; then
+            echo "all-available=true" >> $GITHUB_OUTPUT
+            echo "🎉 All required images are available!"
+          else
+            echo "all-available=false" >> $GITHUB_OUTPUT
+            echo "⚠️ Some required images are missing. Check the logs above."
+          fi
+
+      - name: Pull base images with enhanced retry
+        if: steps.image-check.outputs.all-available == 'true'
+        id: pull-images
+        run: |
+          set -e
+          echo "🚀 Starting image pull process with enhanced retry logic..."
+          
+          MAX_RETRIES=5
+          RETRY_DELAY=30
+          
+          pull_image_with_retry() {
+            local image=$1
+            local image_name=$2
+            local attempt=1
+            local success=false
             
-            echo "Pulling akmods images..."
-            sudo podman pull "${{ env.PULL_IMAGE_REGISTRY }}/akmods:${{ matrix.kernel_flavor}}-${{ matrix.fedora_version }}-${{ matrix.kernel_version }}"
-            sudo podman pull "${{ env.PULL_IMAGE_REGISTRY }}/akmods-${{ matrix.target_nvidia_flavor }}:${{ matrix.kernel_flavor}}-${{ matrix.fedora_version }}-${{ matrix.kernel_version }}"
+            echo "--- Pulling $image_name ---"
+            
+            while [ $attempt -le $MAX_RETRIES ] && [ "$success" = "false" ]; do
+              echo "Attempt $attempt/$MAX_RETRIES: $image"
+              
+              # Try with podman first, then docker as fallback
+              if sudo podman pull "$image"; then
+                echo "✅ Successfully pulled $image_name with podman"
+                success=true
+              elif sudo docker pull "$image"; then
+                echo "✅ Successfully pulled $image_name with docker (fallback)"
+                success=true
+              else
+                echo "❌ Attempt $attempt failed for $image_name"
+                if [ $attempt -lt $MAX_RETRIES ]; then
+                  echo "Waiting ${RETRY_DELAY}s before retry..."
+                  sleep $RETRY_DELAY
+                  # Increase delay for subsequent retries
+                  RETRY_DELAY=$((RETRY_DELAY + 10))
+                fi
+                attempt=$((attempt + 1))
+              fi
+            done
+            
+            if [ "$success" = "false" ]; then
+              echo "💥 CRITICAL: Failed to pull $image_name after $MAX_RETRIES attempts"
+              return 1
+            fi
+            return 0
+          }
+          
+          # Pull each image with enhanced retry logic
+          pull_image_with_retry \
+            "${{ env.PULL_IMAGE_REGISTRY }}/${{ matrix.base_image_name }}-${{ matrix.base_image_flavor }}:${{ matrix.fedora_version }}" \
+            "base image"
+            
+          pull_image_with_retry \
+            "${{ env.PULL_IMAGE_REGISTRY }}/akmods:${{ matrix.kernel_flavor}}-${{ matrix.fedora_version }}-${{ matrix.kernel_version }}" \
+            "akmods image"
+            
+          pull_image_with_retry \
+            "${{ env.PULL_IMAGE_REGISTRY }}/akmods-${{ matrix.target_nvidia_flavor }}:${{ matrix.kernel_flavor}}-${{ matrix.fedora_version }}-${{ matrix.kernel_version }}" \
+            "NVIDIA akmods image"
+          
+          echo "🎉 All images pulled successfully!"
+          
+          # Verify images are actually available locally
+          echo "Verifying local images..."
+          sudo podman images || sudo docker images
 
       - name: Get source versions
         id: labels
-        uses: Wandalen/wretry.action@v3.8.0
-        with:
-          attempt_limit: 3
-          attempt_delay: 15000
-          command: |
-            set -eo pipefail
-            echo "Inspecting source image..."
-            skopeo inspect "docker://${{ env.PULL_IMAGE_REGISTRY }}/${{ matrix.base_image_name }}-${{ matrix.base_image_flavor }}:${{ matrix.fedora_version }}" > source.json
-            
-            ver=$(jq -r '.Labels["org.opencontainers.image.version"]' source.json)
-            if [ -z "$ver" ] || [ "null" = "$ver" ]; then
-              echo "Error: inspected image version must not be empty or null"
-              exit 1
-            fi
-            echo "SOURCE_IMAGE_VERSION=$ver" >> $GITHUB_ENV
-            echo "Source image version: $ver"
+        if: steps.image-check.outputs.all-available == 'true'
+        run: |
+          set -eo pipefail
+          echo "Inspecting source image..."
+          skopeo inspect "docker://${{ env.PULL_IMAGE_REGISTRY }}/${{ matrix.base_image_name }}-${{ matrix.base_image_flavor }}:${{ matrix.fedora_version }}" > source.json
+          
+          ver=$(jq -r '.Labels["org.opencontainers.image.version"]' source.json)
+          if [ -z "$ver" ] || [ "null" = "$ver" ]; then
+            echo "Error: inspected image version must not be empty or null"
+            exit 1
+          fi
+          echo "SOURCE_IMAGE_VERSION=$ver" >> $GITHUB_ENV
+          echo "Source image version: $ver"
       
       - name: Generate Version
         id: generate-version
@@ -370,6 +479,7 @@ jobs:
 
       - name: Build Image
         id: build_image
+        if: steps.image-check.outputs.all-available == 'true'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -387,6 +497,7 @@ jobs:
           sudo buildah images
 
       - name: Clean up auxiliary images
+        if: always()
         run: |
           set +e
           echo "Cleaning up auxiliary images to free up space..."
@@ -395,6 +506,16 @@ jobs:
           sudo podman image rm "${{ env.PULL_IMAGE_REGISTRY }}/akmods-${{ matrix.target_nvidia_flavor }}:${{ matrix.kernel_flavor}}-${{ matrix.fedora_version }}-${{ matrix.kernel_version }}" || echo "Nvidia akmods image already removed or not found"
           echo "Cleanup completed"
 
+      - name: Skip build due to missing images
+        if: steps.image-check.outputs.all-available == 'false'
+        run: |
+          echo "❌ SKIPPING BUILD: One or more required base images are not available"
+          echo "Base image available: ${{ steps.image-check.outputs.base-available }}"
+          echo "Akmods image available: ${{ steps.image-check.outputs.akmods-available }}"
+          echo "NVIDIA akmods image available: ${{ steps.image-check.outputs.nvidia-available }}"
+          exit 1
+
+      # ... (reszta kroków pozostaje bez zmian)
       - name: Lowercase Registry
         id: registry_case
         uses: ASzc/change-string-case-action@v6
@@ -416,6 +537,7 @@ jobs:
           echo "ref=${IMAGEREF}" >> $GITHUB_OUTPUT
 
       - name: Check Secureboot signatures
+        if: steps.image-check.outputs.all-available == 'true'
         shell: bash
         run: |
           set -e
@@ -480,6 +602,7 @@ jobs:
           echo "Secureboot signature verification passed"
 
       - name: Run Rechunker
+        if: steps.image-check.outputs.all-available == 'true'
         id: rechunk
         uses: hhd-dev/rechunk@v1.2.4
         with:
@@ -502,6 +625,7 @@ jobs:
             org.universal-blue.pkg.gamescope=<relver:gamescope>
 
       - name: Generate tags
+        if: steps.image-check.outputs.all-available == 'true'
         id: generate-tags
         shell: bash
         run: |
@@ -552,10 +676,11 @@ jobs:
           echo "alias_tags=$(IFS=,; echo "${BUILD_TAGS[*]}")" >> $GITHUB_OUTPUT
 
       - name: Install Cosign
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && steps.image-check.outputs.all-available == 'true'
         uses: sigstore/cosign-installer@v3.10.0
 
       - name: Push To GHCR and Sign
+        if: steps.image-check.outputs.all-available == 'true'
         uses: Wandalen/wretry.action@v3.8.0
         with:
           attempt_limit: 3
@@ -590,6 +715,21 @@ jobs:
             echo "Image push and signing completed successfully"
         env:
           SIGNING_SECRET: ${{ secrets.SIGNING_SECRET }}
+
+      - name: Diagnostic information on failure
+        if: failure() && steps.image-check.outputs.all-available == 'false'
+        run: |
+          echo "## 🔍 Diagnostic Information"
+          echo "### Network Check"
+          nslookup ghcr.io || true
+          echo ""
+          echo "### Registry Access"
+          curl -I https://ghcr.io/v2/ || true
+          echo ""
+          echo "### Available Images in Registry"
+          echo "Base image: ${{ env.PULL_IMAGE_REGISTRY }}/${{ matrix.base_image_name }}-${{ matrix.base_image_flavor }}:${{ matrix.fedora_version }}"
+          echo "Akmods image: ${{ env.PULL_IMAGE_REGISTRY }}/akmods:${{ matrix.kernel_flavor}}-${{ matrix.fedora_version }}-${{ matrix.kernel_version }}"
+          echo "NVIDIA akmods image: ${{ env.PULL_IMAGE_REGISTRY }}/akmods-${{ matrix.target_nvidia_flavor }}:${{ matrix.kernel_flavor}}-${{ matrix.fedora_version }}-${{ matrix.kernel_version }}"
 
   generate_release:
     name: Generate Release
