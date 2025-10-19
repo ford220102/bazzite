@@ -31,13 +31,11 @@ on:
     inputs:
       handwritten:
         description: 'Small changelog:'
-      # Run with this periodically to analyze the image again
-      # As package drift will make the plan eventually non-ideal
-      # (existing users will have to redownload most of the image)
       fresh-rechunk:
         description: 'Clear rechunk history'
         type: boolean
         default: false
+
 env:
   PULL_IMAGE_REGISTRY: ghcr.io/ublue-os
   PUSH_IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
@@ -48,8 +46,9 @@ concurrency:
 
 jobs:
   push-ghcr:
-    name: Make
+    name: Build Bazzite Image
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     continue-on-error: false
     permissions:
       contents: read
@@ -58,39 +57,130 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        base_image_flavor: [main]
-        base_name: [bazzite, bazzite-deck, bazzite-nvidia, bazzite-deck-nvidia]
-        base_image_name: [kinoite, silverblue]
-        target_image_flavor: [main, asus, surface]
-        target_nvidia_flavor: [nvidia, nvidia-open]
-        fedora_version: [42]
         include:
-          - fedora_version: 42
+          - base_image_flavor: main
+            base_name: bazzite
+            base_image_name: kinoite
+            target_image_flavor: main
+            target_nvidia_flavor: nvidia-open
+            fedora_version: 42
             is_latest_version: true
             is_stable_version: true
-            kernel_flavor: bazzite # must match a kernel_flavor from akmods repo
-            kernel_version: 6.16.4-116.bazzite.fc42.x86_64 # must match a cached version of the above flavor
-        exclude:
-          - target_image_flavor: surface
-          - base_name: bazzite
-            target_nvidia_flavor: nvidia
-          - base_name: bazzite-deck
-            target_nvidia_flavor: nvidia
-          - base_name: bazzite-deck-nvidia
-            target_nvidia_flavor: nvidia
-          - base_name: bazzite-deck-nvidia
+            kernel_flavor: bazzite
+            kernel_version: 6.16.4-116.bazzite.fc42.x86_64
+
+          - base_image_flavor: main
+            base_name: bazzite
+            base_image_name: silverblue
+            target_image_flavor: main
+            target_nvidia_flavor: nvidia-open
+            fedora_version: 42
+            is_latest_version: true
+            is_stable_version: true
+            kernel_flavor: bazzite
+            kernel_version: 6.16.4-116.bazzite.fc42.x86_64
+
+          - base_image_flavor: main
+            base_name: bazzite
+            base_image_name: kinoite
             target_image_flavor: asus
-          - base_name: bazzite-deck-nvidia
+            target_nvidia_flavor: nvidia-open
+            fedora_version: 42
+            is_latest_version: true
+            is_stable_version: true
+            kernel_flavor: bazzite
+            kernel_version: 6.16.4-116.bazzite.fc42.x86_64
+
+          - base_image_flavor: main
+            base_name: bazzite
+            base_image_name: silverblue
+            target_image_flavor: asus
+            target_nvidia_flavor: nvidia-open
+            fedora_version: 42
+            is_latest_version: true
+            is_stable_version: true
+            kernel_flavor: bazzite
+            kernel_version: 6.16.4-116.bazzite.fc42.x86_64
+
+          - base_image_flavor: main
+            base_name: bazzite
+            base_image_name: kinoite
             target_image_flavor: surface
-          - base_name: bazzite-deck
-            target_image_flavor: surface
-          - target_image_flavor: surface
+            target_nvidia_flavor: nvidia-open
+            fedora_version: 42
+            is_latest_version: true
+            is_stable_version: true
+            kernel_flavor: bazzite
+            kernel_version: 6.16.4-116.bazzite.fc42.x86_64
+
+          - base_image_flavor: main
+            base_name: bazzite-deck
+            base_image_name: kinoite
+            target_image_flavor: main
+            target_nvidia_flavor: nvidia-open
+            fedora_version: 42
+            is_latest_version: true
+            is_stable_version: true
+            kernel_flavor: bazzite
+            kernel_version: 6.16.4-116.bazzite.fc42.x86_64
+
+          - base_image_flavor: main
+            base_name: bazzite-deck
+            base_image_name: kinoite
+            target_image_flavor: asus
+            target_nvidia_flavor: nvidia-open
+            fedora_version: 42
+            is_latest_version: true
+            is_stable_version: true
+            kernel_flavor: bazzite
+            kernel_version: 6.16.4-116.bazzite.fc42.x86_64
+
+          - base_image_flavor: main
+            base_name: bazzite-nvidia
+            base_image_name: kinoite
+            target_image_flavor: main
             target_nvidia_flavor: nvidia
+            fedora_version: 42
+            is_latest_version: true
+            is_stable_version: true
+            kernel_flavor: bazzite
+            kernel_version: 6.16.4-116.bazzite.fc42.x86_64
+
+          - base_image_flavor: main
+            base_name: bazzite-nvidia
+            base_image_name: silverblue
+            target_image_flavor: main
+            target_nvidia_flavor: nvidia
+            fedora_version: 42
+            is_latest_version: true
+            is_stable_version: true
+            kernel_flavor: bazzite
+            kernel_version: 6.16.4-116.bazzite.fc42.x86_64
+
+          - base_image_flavor: main
+            base_name: bazzite-deck-nvidia
+            base_image_name: kinoite
+            target_image_flavor: main
+            target_nvidia_flavor: nvidia
+            fedora_version: 42
+            is_latest_version: true
+            is_stable_version: true
+            kernel_flavor: bazzite
+            kernel_version: 6.16.4-116.bazzite.fc42.x86_64
+
     steps:
       - name: Mount BTRFS for podman storage
         uses: ublue-os/container-storage-action@main
         with:
           target-dir: /var/lib/containers
+
+      - name: Cache Buildah layers
+        uses: actions/cache@v3
+        with:
+          path: /var/lib/containers
+          key: buildah-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            buildah-${{ runner.os }}-
 
       - name: Define env.CONTAINER_TARGET
         run: |
@@ -147,11 +237,12 @@ jobs:
         run: |
           echo "SHA_HEAD_SHORT=${GITHUB_SHA::7}" >> $GITHUB_ENV
 
-      # Checkout push-to-registry action GitHub repository
-      - name: Checkout Push to Registry action
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      # Prepare offline documentation
+      - name: Check just syntax
+        uses: ublue-os/just-action@v2
+
       - name: Download offline docs
         id: download_offline_docs
         continue-on-error: true
@@ -160,80 +251,88 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           DOCS_DIR="${{ github.workspace }}/system_files/desktop/shared/usr/share/ublue-os/docs/html"
-          mkdir -p $DOCS_DIR
+          mkdir -p "$DOCS_DIR"
           cd $(mktemp -d)
-          gh run download --repo=$docs_repo -n github-pages
-          tar -xC "$DOCS_DIR" -f artifact.tar
+          
+          echo "Downloading documentation from $docs_repo..."
+          if ! gh run download --repo="$docs_repo" -n github-pages; then
+            echo "Warning: Failed to download docs from $docs_repo, continuing without them"
+            exit 0
+          fi
+          
+          if [ -f artifact.tar ]; then
+            echo "Extracting documentation..."
+            tar -xC "$DOCS_DIR" -f artifact.tar
+            echo "Documentation extracted successfully"
+          else
+            echo "No artifact.tar found, continuing without docs"
+          fi
 
-      - name: Check just syntax
-        uses: ublue-os/just-action@bda593098a84a84973b002b4377709166a68be52 # v2
-
-      - name: Pull main, akmods, rechunk images
-        uses: Wandalen/wretry.action@e68c23e6309f2871ca8ae4763e7629b9c258e1ea # v3.8.0
+      - name: Pull base images with retry
+        uses: Wandalen/wretry.action@v3.8.0
         with:
           attempt_limit: 3
           attempt_delay: 15000
           command: |
-            # pull the base images used for FROM in Containerfile so
-            # we can retry on that unfortunately common failure case
-            sudo podman pull ${{ env.PULL_IMAGE_REGISTRY }}/${{ matrix.base_image_name }}-${{ matrix.base_image_flavor }}:${{ matrix.fedora_version }}
-            sudo podman pull ${{ env.PULL_IMAGE_REGISTRY }}/akmods:${{ matrix.kernel_flavor}}-${{ matrix.fedora_version }}-${{ matrix.kernel_version }}
-            sudo podman pull ${{ env.PULL_IMAGE_REGISTRY }}/akmods-${{ matrix.target_nvidia_flavor }}:${{ matrix.kernel_flavor}}-${{ matrix.fedora_version }}-${{ matrix.kernel_version }}
+            set -e
+            echo "Pulling base image..."
+            sudo podman pull "${{ env.PULL_IMAGE_REGISTRY }}/${{ matrix.base_image_name }}-${{ matrix.base_image_flavor }}:${{ matrix.fedora_version }}"
+            
+            echo "Pulling akmods images..."
+            sudo podman pull "${{ env.PULL_IMAGE_REGISTRY }}/akmods:${{ matrix.kernel_flavor}}-${{ matrix.fedora_version }}-${{ matrix.kernel_version }}"
+            sudo podman pull "${{ env.PULL_IMAGE_REGISTRY }}/akmods-${{ matrix.target_nvidia_flavor }}:${{ matrix.kernel_flavor}}-${{ matrix.fedora_version }}-${{ matrix.kernel_version }}"
 
       - name: Get source versions
         id: labels
-        uses: Wandalen/wretry.action@e68c23e6309f2871ca8ae4763e7629b9c258e1ea # v3.8.0
+        uses: Wandalen/wretry.action@v3.8.0
         with:
           attempt_limit: 3
           attempt_delay: 15000
           command: |
             set -eo pipefail
-            skopeo inspect docker://${{ env.PULL_IMAGE_REGISTRY }}/${{ matrix.base_image_name }}-${{ matrix.base_image_flavor }}:${{ matrix.fedora_version }} > source.json
+            echo "Inspecting source image..."
+            skopeo inspect "docker://${{ env.PULL_IMAGE_REGISTRY }}/${{ matrix.base_image_name }}-${{ matrix.base_image_flavor }}:${{ matrix.fedora_version }}" > source.json
+            
             ver=$(jq -r '.Labels["org.opencontainers.image.version"]' source.json)
             if [ -z "$ver" ] || [ "null" = "$ver" ]; then
-              echo "inspected image version must not be empty or null"
+              echo "Error: inspected image version must not be empty or null"
               exit 1
             fi
             echo "SOURCE_IMAGE_VERSION=$ver" >> $GITHUB_ENV
+            echo "Source image version: $ver"
       
-      # Generate a primary version key that appears
-      # in KDE, rpm-ostree status, and github.
       - name: Generate Version
         id: generate-version
         shell: bash
         run: |
-          # Generate the primary version key that will be stored on os-release,
-          # shown on the bootloader, and used for the image tag.
           UPSTREAM_TAG="${{ env.SOURCE_IMAGE_VERSION }}"
-          # Remove .0 suffix from upstream tag so we can add our own and
-          # the wrong one does not end up in the image.
-          UPSTREAM_TAG="${UPSTREAM_TAG%\.[0-9]}" 
+          UPSTREAM_TAG="${UPSTREAM_TAG%\.[0-9]}"
           FEDORA_VERSION="${{ matrix.fedora_version }}"
           SHA_SHORT="${GITHUB_SHA::7}"
 
           if [ -n "${{ github.event.pull_request.number }}" ]; then
             VERSION="pr-${FEDORA_VERSION}-${{ github.event.pull_request.number }}"
             PRETTY_VERSION="PR (${{ github.event.pull_request.number }}, ${UPSTREAM_TAG})"
-          elif [[ ${{ github.ref_name }} == "unstable" ]]; then
+          elif [[ "${{ github.ref_name }}" == "unstable" ]]; then
             VERSION="unstable-${UPSTREAM_TAG}"
             PRETTY_VERSION="Unstable (F${UPSTREAM_TAG}, #${SHA_SHORT})"
-          elif [[ ${{ github.ref_name }} == "testing" ]]; then
+          elif [[ "${{ github.ref_name }}" == "testing" ]]; then
             VERSION="testing-${UPSTREAM_TAG}"
             PRETTY_VERSION="Testing (F${UPSTREAM_TAG}, #${SHA_SHORT})"
           else
             VERSION="${UPSTREAM_TAG}"
             PRETTY_VERSION="Stable (F${UPSTREAM_TAG})"
           fi
+          
           echo "tag=${VERSION}" >> $GITHUB_OUTPUT
           echo "pretty=${PRETTY_VERSION}" >> $GITHUB_OUTPUT
+          echo "Generated version: ${VERSION}"
+          echo "Pretty version: ${PRETTY_VERSION}"
 
-          echo "Generated the following:"
-          cat $GITHUB_OUTPUT
-
-      # Generate a file with all the build-args passed to buildah
       - name: Prepare build args file
+        id: prepare-build-args
         run: |
-          cat <<'EOF' >>build_args.txt
+          cat << EOF > build_args.txt
           IMAGE_NAME=${{ env.IMAGE_NAME }}
           IMAGE_FLAVOR=${{ env.IMAGE_FLAVOR }}
           NVIDIA_FLAVOR=${{ matrix.target_nvidia_flavor }}
@@ -249,74 +348,140 @@ jobs:
           VERSION_TAG=${{ steps.generate-version.outputs.tag }}
           VERSION_PRETTY=${{ steps.generate-version.outputs.pretty }}
           EOF
+          
+          echo "Build args file created:"
+          cat build_args.txt
 
-      # Build image using buildah and save it to raw-img
+      - name: Validate build args
+        run: |
+          if [ ! -f build_args.txt ] || [ ! -s build_args.txt ]; then
+            echo "Error: build_args.txt is missing or empty"
+            exit 1
+          fi
+          
+          required_vars=("IMAGE_NAME" "FEDORA_VERSION" "VERSION_TAG")
+          for var in "${required_vars[@]}"; do
+            if ! grep -q "^${var}=" build_args.txt; then
+              echo "Error: Required variable ${var} not found in build_args.txt"
+              exit 1
+            fi
+          done
+          echo "Build args validation passed"
+
       - name: Build Image
         id: build_image
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -e
+          echo "Starting image build for target: ${{ env.CONTAINER_TARGET }}"
+          
           sudo -E buildah build \
             --target ${{ env.CONTAINER_TARGET }} \
             --build-arg-file build_args.txt \
             --secret "id=GITHUB_TOKEN,env=GITHUB_TOKEN" \
-            --tag raw-img .
-      
-      - name: Remove auxiliary images
-        # We are tight on space, need at least 2x for OSTree
-        run: |
-          sudo podman image rm ${{ env.PULL_IMAGE_REGISTRY }}/${{ matrix.base_image_name }}-${{ matrix.base_image_flavor }}:${{ matrix.fedora_version }}
-          sudo podman image rm ${{ env.PULL_IMAGE_REGISTRY }}/akmods:${{ matrix.kernel_flavor}}-${{ matrix.fedora_version }}-${{ matrix.kernel_version }}
-          sudo podman image rm ${{ env.PULL_IMAGE_REGISTRY }}/akmods-${{ matrix.target_nvidia_flavor }}:${{ matrix.kernel_flavor}}-${{ matrix.fedora_version }}-${{ matrix.kernel_version }}
+            --tag raw-img \
+            --file Containerfile .
+          
+          echo "Image build completed successfully"
+          sudo buildah images
 
-      # Workaround bug where capital letters in your GitHub username make it impossible to push to GHCR.
-      # https://github.com/macbre/push-to-ghcr/issues/12
+      - name: Clean up auxiliary images
+        run: |
+          set +e
+          echo "Cleaning up auxiliary images to free up space..."
+          sudo podman image rm "${{ env.PULL_IMAGE_REGISTRY }}/${{ matrix.base_image_name }}-${{ matrix.base_image_flavor }}:${{ matrix.fedora_version }}" || echo "Base image already removed or not found"
+          sudo podman image rm "${{ env.PULL_IMAGE_REGISTRY }}/akmods:${{ matrix.kernel_flavor}}-${{ matrix.fedora_version }}-${{ matrix.kernel_version }}" || echo "Akmods image already removed or not found"
+          sudo podman image rm "${{ env.PULL_IMAGE_REGISTRY }}/akmods-${{ matrix.target_nvidia_flavor }}:${{ matrix.kernel_flavor}}-${{ matrix.fedora_version }}-${{ matrix.kernel_version }}" || echo "Nvidia akmods image already removed or not found"
+          echo "Cleanup completed"
+
       - name: Lowercase Registry
         id: registry_case
-        uses: ASzc/change-string-case-action@d0603cd0a7dd490be678164909f65c7737470a7f # v6
+        uses: ASzc/change-string-case-action@v6
         with:
           string: ${{ env.PUSH_IMAGE_REGISTRY }}
-      
-      # Generate the previous image reference used by the Rechunker
+
       - name: Generate previous reference
         id: generate-prev-ref
         shell: bash
         run: |
           if [ "${{ github.event.inputs.fresh-rechunk }}" == "true" ]; then
             IMAGEREF=""
+            echo "Fresh rechunk requested, no previous reference"
           else
             IMAGEREF="${{ steps.registry_case.outputs.lowercase }}/${{ env.IMAGE_NAME }}:stable"
+            echo "Using previous reference: $IMAGEREF"
           fi
 
           echo "ref=${IMAGEREF}" >> $GITHUB_OUTPUT
 
-          echo "Generated the following:"
-          cat $GITHUB_OUTPUT
-
-      - name: Check Secureboot
+      - name: Check Secureboot signatures
         shell: bash
         run: |
-          set -x
+          set -e
+          echo "Checking Secureboot signatures..."
+          
+          # Install required tools
           if [[ ! $(command -v sbverify) || ! $(command -v curl) || ! $(command -v openssl) ]]; then
             sudo apt update
-            sudo apt install sbsigntool curl openssl
+            sudo apt install -y sbsigntool curl openssl ca-certificates
           fi
-          TMP=$(sudo podman create raw-img bash)
-          sudo podman cp $TMP:/usr/lib/modules/${{ matrix.kernel_version }}/vmlinuz .
-          sudo podman rm $TMP
-          sudo chmod 666 vmlinuz # might not be needed
-          sbverify --list vmlinuz
-          curl --retry 3 -Lo kernel-sign.der https://github.com/ublue-os/kernel-cache/raw/main/certs/public_key.der
-          curl --retry 3 -Lo akmods.der https://github.com/ublue-os/kernel-cache/raw/main/certs/public_key_2.der
-          openssl x509 -in kernel-sign.der -out kernel-sign.crt
-          openssl x509 -in akmods.der -out akmods.crt
-          sbverify --cert kernel-sign.crt vmlinuz || exit 1
-          sbverify --cert akmods.crt vmlinuz || exit 1
+          
+          # Extract kernel
+          TMP_CONTAINER=$(sudo podman create raw-img bash)
+          sudo podman cp "$TMP_CONTAINER:/usr/lib/modules/${{ matrix.kernel_version }}/vmlinuz" . || {
+            echo "Error: Failed to extract vmlinuz"
+            sudo podman rm "$TMP_CONTAINER"
+            exit 1
+          }
+          sudo podman rm "$TMP_CONTAINER"
+          
+          # Verify file exists and set permissions
+          if [ ! -f vmlinuz ]; then
+            echo "Error: vmlinuz not found after extraction"
+            exit 1
+          fi
+          sudo chmod 644 vmlinuz
+          
+          # Download and verify certificates
+          echo "Downloading signing certificates..."
+          curl --retry 3 -Lo kernel-sign.der https://github.com/ublue-os/kernel-cache/raw/main/certs/public_key.der || {
+            echo "Error: Failed to download kernel certificate"
+            exit 1
+          }
+          curl --retry 3 -Lo akmods.der https://github.com/ublue-os/kernel-cache/raw/main/certs/public_key_2.der || {
+            echo "Error: Failed to download akmods certificate"
+            exit 1
+          }
+          
+          # Convert certificates
+          openssl x509 -inform der -in kernel-sign.der -out kernel-sign.crt || {
+            echo "Error: Failed to convert kernel certificate"
+            exit 1
+          }
+          openssl x509 -inform der -in akmods.der -out akmods.crt || {
+            echo "Error: Failed to convert akmods certificate"
+            exit 1
+          }
+          
+          # Verify signatures
+          echo "Verifying kernel signature with kernel certificate..."
+          if ! sbverify --cert kernel-sign.crt vmlinuz; then
+            echo "Error: Kernel signature verification failed with kernel certificate"
+            exit 1
+          fi
+          
+          echo "Verifying kernel signature with akmods certificate..."
+          if ! sbverify --cert akmods.crt vmlinuz; then
+            echo "Error: Kernel signature verification failed with akmods certificate"
+            exit 1
+          fi
+          
+          echo "Secureboot signature verification passed"
 
-      # Reprocess raw-img using rechunker which will delete it
       - name: Run Rechunker
         id: rechunk
-        uses: hhd-dev/rechunk@5fbe1d3a639615d2548d83bc888360de6267b1a2 # v1.2.4
+        uses: hhd-dev/rechunk@v1.2.4
         with:
           rechunk: 'ghcr.io/hhd-dev/rechunk:v1.2.4'
           ref: 'raw-img'
@@ -335,92 +500,94 @@ jobs:
             org.opencontainers.image.url=https://bazzite.gg
             org.universal-blue.pkg.kernel=<relver:kernel>
             org.universal-blue.pkg.gamescope=<relver:gamescope>
-      
-      # Generate tags after rechunker runs and checks the primary tag is not duplicated
-      # If it is, rechunk will suffix it by .1, .2, etc and put it in steps.rechunk.outputs.version
+
       - name: Generate tags
         id: generate-tags
         shell: bash
         run: |
-          # Common vars for generating tags
           VERSION_TAG="${{ steps.rechunk.outputs.version }}"
           UPSTREAM_TAG="${{ env.SOURCE_IMAGE_VERSION }}"
           FEDORA_VERSION="${{ matrix.fedora_version }}"
           SHA_SHORT="${GITHUB_SHA::7}"
-          BUILD_TAGS=( "${VERSION_TAG}" )
-
-          # Use latest var to check if we should tag as latest
+          
+          BUILD_TAGS=("${VERSION_TAG}")
           unset LATEST
+          
           if [[ "${{ matrix.is_latest_version }}" == "true" ]] && \
-              [[ "${{ matrix.is_stable_version }}" == "true" ]]; then
-                LATEST="1"
+             [[ "${{ matrix.is_stable_version }}" == "true" ]]; then
+            LATEST="1"
           fi
 
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            # Track latest ver per PR
             if [ -n "$LATEST" ]; then
-                BUILD_TAGS+=("pr-${{ github.event.pull_request.number }}")
+              BUILD_TAGS+=("pr-${{ github.event.pull_request.number }}")
             fi
-          elif [[ ${{ github.ref_name }} == "unstable" ]]; then
-            # Per fedora version
+          elif [[ "${{ github.ref_name }}" == "unstable" ]]; then
             BUILD_TAGS+=("${FEDORA_VERSION}-unstable")
-            BUILD_TAGS+=("unstable-${FEDORA_VERSION}") # flip ver to be last
-
+            BUILD_TAGS+=("unstable-${FEDORA_VERSION}")
             if [ -n "$LATEST" ]; then
-                BUILD_TAGS+=("unstable")
+              BUILD_TAGS+=("unstable")
             fi
-          elif [[ ${{ github.ref_name }} == "testing" ]]; then
-            # Per fedora version
+          elif [[ "${{ github.ref_name }}" == "testing" ]]; then
             BUILD_TAGS+=("${FEDORA_VERSION}-testing")
-            BUILD_TAGS+=("testing-${FEDORA_VERSION}") # flip ver to be last
-
+            BUILD_TAGS+=("testing-${FEDORA_VERSION}")
             if [ -n "$LATEST" ]; then
-                BUILD_TAGS+=("testing")
+              BUILD_TAGS+=("testing")
             fi
           else
             BUILD_TAGS+=("${FEDORA_VERSION}")
             BUILD_TAGS+=("stable-${VERSION_TAG}")
-
-            # Per fedora version
             BUILD_TAGS+=("${FEDORA_VERSION}-stable")
-            BUILD_TAGS+=("stable-${FEDORA_VERSION}") # flip ver to be last
-            
+            BUILD_TAGS+=("stable-${FEDORA_VERSION}")
             if [ -n "$LATEST" ]; then
               BUILD_TAGS+=("latest" "stable")
             fi
           fi
           
-          echo "Generated the following build tags: "
+          echo "Generated build tags:"
           for TAG in "${BUILD_TAGS[@]}"; do
-              echo "${TAG}"
+            echo "  - ${TAG}"
           done
-          echo "alias_tags=${BUILD_TAGS[*]}" >> $GITHUB_OUTPUT
+          
+          echo "alias_tags=$(IFS=,; echo "${BUILD_TAGS[*]}")" >> $GITHUB_OUTPUT
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0
         if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@v3.10.0
 
-      # Push the image to GHCR (Image Registry)
       - name: Push To GHCR and Sign
-        uses: Wandalen/wretry.action@e68c23e6309f2871ca8ae4763e7629b9c258e1ea # v3.8.0
+        uses: Wandalen/wretry.action@v3.8.0
         with:
           attempt_limit: 3
           attempt_delay: 15000
           command: |
-            log_sum() { echo "$1" >> $GITHUB_STEP_SUMMARY; }
-            log_sum '# Push to GHCR result'
-            log_sum '```'
-            echo "${{ secrets.GITHUB_TOKEN }}" | sudo podman login ghcr.io -u ${{ github.actor }} --password-stdin
-            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-            for tag in ${{ steps.generate-tags.outputs.alias_tags }}; do
-              dest_image="${{ steps.registry_case.outputs.lowercase }}/${{ env.IMAGE_NAME }}:$tag"
-              sudo skopeo copy ${{ steps.rechunk.outputs.ref }} docker://$dest_image
-              log_sum "$dest_image"
+            set -e
+            echo "Pushing images to GHCR..."
+            
+            echo "${{ secrets.GITHUB_TOKEN }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+            
+            IFS=',' read -ra TAGS <<< "${{ steps.generate-tags.outputs.alias_tags }}"
+            
+            echo "## Push Results" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            
+            for tag in "${TAGS[@]}"; do
+              dest_image="${{ steps.registry_case.outputs.lowercase }}/${{ env.IMAGE_NAME }}:${tag}"
+              echo "Pushing: ${dest_image}"
+              sudo skopeo copy "${{ steps.rechunk.outputs.ref }}" "docker://${dest_image}"
+              echo "${dest_image}" >> $GITHUB_STEP_SUMMARY
             done
-            log_sum '```'
-            DIGEST=$(sudo skopeo inspect --format '{{.Digest}}' ${{ steps.rechunk.outputs.ref }})
+            
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            
+            DIGEST=$(sudo skopeo inspect --format '{{.Digest}}' "${{ steps.rechunk.outputs.ref }}")
+            echo "Signing image with digest: ${DIGEST}"
+            
             cosign sign -y --key env://SIGNING_SECRET --new-bundle-format=false \
-              "${{ steps.registry_case.outputs.lowercase }}/${{ env.IMAGE_NAME }}@$DIGEST"
+              "${{ steps.registry_case.outputs.lowercase }}/${{ env.IMAGE_NAME }}@${DIGEST}"
+            
+            echo "Image push and signing completed successfully"
         env:
           SIGNING_SECRET: ${{ secrets.SIGNING_SECRET }}
 
