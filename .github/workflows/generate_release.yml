@@ -1,49 +1,224 @@
+name: Generate Release
+
 on:
   workflow_call:
   workflow_dispatch:
     inputs:
       handwritten:
         description: 'Small changelog about changes in this build:'
+        required: false
+        default: ''
       target:
         description: 'Release Branch (e.g., testing). Defaults to branch name.'
+        required: false
+        default: ''
+
 permissions:
   contents: write
+  packages: read
 
-name: Generate Release
 jobs:
   generate-release:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Checkout last 500 commits (for <commits> to work)
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+      - name: Checkout repository with full history
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 500
+          fetch-depth: 0  # Get full history for proper commit analysis
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get target
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Get target branch
         id: get-target
         run: |
-          TARGET="${{ github.event.inputs.target || github.ref }}"
-          TARGET="${TARGET##*/}"
+          # Use input target, or fall back to current branch
+          INPUT_TARGET="${{ github.event.inputs.target }}"
+          CURRENT_REF="${{ github.ref }}"
+          
+          if [ -n "$INPUT_TARGET" ]; then
+            TARGET="$INPUT_TARGET"
+          else
+            # Extract branch name from ref (refs/heads/branch-name)
+            TARGET="${CURRENT_REF#refs/heads/}"
+            TARGET="${TARGET#refs/tags/}"
+          fi
+          
+          # Normalize target names
           if [ "$TARGET" = "main" ]; then
             TARGET="stable"
+          elif [ "$TARGET" = "master" ]; then
+            TARGET="stable"
           fi
+          
           echo "target=$TARGET" >> $GITHUB_OUTPUT
-      
+          echo "Using target: $TARGET"
+
+      - name: Validate target
+        id: validate-target
+        run: |
+          TARGET="${{ steps.get-target.outputs.target }}"
+          
+          # Validate target is one of the expected values
+          case "$TARGET" in
+            "stable"|"testing"|"unstable")
+              echo "Valid target: $TARGET"
+              ;;
+            *)
+              echo "Error: Invalid target '$TARGET'. Must be one of: stable, testing, unstable"
+              exit 1
+              ;;
+          esac
+
+      - name: Create output directory
+        run: |
+          mkdir -p ./release_artifacts
+
       - name: Generate Release Text
         id: generate-release
+        env:
+          HANDWRITTEN_CHANGELOG: ${{ github.event.inputs.handwritten }}
         run: |
+          set -e  # Exit on error
+          
+          echo "Generating release text for target: ${{ steps.get-target.outputs.target }}"
+          echo "Handwritten changelog length: ${#HANDWRITTEN_CHANGELOG} characters"
+          
+          # Run the changelog generator
           python3 ./.github/workflows/changelog.py \
             "${{ steps.get-target.outputs.target }}" \
-            ./output.env ./changelog.md --workdir . --handwritten "${{ github.event.inputs.handwritten }}"
-          source ./output.env
+            ./release_artifacts/output.env \
+            ./release_artifacts/changelog.md \
+            --workdir "." \
+            --handwritten "$HANDWRITTEN_CHANGELOG"
+          
+          # Source the environment variables
+          source ./release_artifacts/output.env
+          
+          echo "Generated title: ${TITLE}"
+          echo "Generated tag: ${TAG}"
+          
+          # Set outputs
           echo "title=${TITLE}" >> $GITHUB_OUTPUT
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          
+          # Display generated changelog for verification
+          echo "Generated changelog preview:"
+          head -20 ./release_artifacts/changelog.md
+
+      - name: Verify generated files
+        id: verify-files
+        run: |
+          echo "Checking generated files..."
+          
+          if [ ! -f "./release_artifacts/output.env" ]; then
+            echo "Error: output.env file not generated"
+            exit 1
+          fi
+          
+          if [ ! -f "./release_artifacts/changelog.md" ]; then
+            echo "Error: changelog.md file not generated"
+            exit 1
+          fi
+          
+          # Check if title and tag are set
+          source ./release_artifacts/output.env
+          if [ -z "$TITLE" ]; then
+            echo "Error: TITLE not set in output.env"
+            exit 1
+          fi
+          
+          if [ -z "$TAG" ]; then
+            echo "Error: TAG not set in output.env"
+            exit 1
+          fi
+          
+          echo "Files verified successfully"
+          echo "Title: $TITLE"
+          echo "Tag: $TAG"
+
+      - name: Check if tag already exists
+        id: check-tag
+        run: |
+          TAG="${{ steps.generate-release.outputs.tag }}"
+          echo "Checking if tag '$TAG' already exists..."
+          
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag '$TAG' already exists!"
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "Tag '$TAG' does not exist yet"
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Create Release
-        uses: softprops/action-gh-release@aec2ec56f94eb8180ceec724245f64ef008b89f5 # v2
+        if: steps.check-tag.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
         with:
           name: ${{ steps.generate-release.outputs.title }}
           tag_name: ${{ steps.generate-release.outputs.tag }}
-          body_path: ./changelog.md
+          body_path: ./release_artifacts/changelog.md
           make_latest: ${{ steps.get-target.outputs.target == 'stable' }}
           prerelease: ${{ steps.get-target.outputs.target != 'stable' }}
+          draft: false
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update existing release
+        if: steps.check-tag.outputs.exists == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.generate-release.outputs.tag }}
+          body_path: ./release_artifacts/changelog.md
+          make_latest: ${{ steps.get-target.outputs.target == 'stable' }}
+          prerelease: ${{ steps.get-target.outputs.target != 'stable' }}
+          draft: false
+          generate_release_notes: false
+          update: true  # This will update the existing release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release summary
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Target:** ${{ steps.get-target.outputs.target }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Release Title:** ${{ steps.generate-release.outputs.title }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Tag:** ${{ steps.generate-release.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ steps.check-tag.outputs.exists == 'true' && 'Updated existing release' || 'Created new release' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Changelog Preview" >> $GITHUB_STEP_SUMMARY
+          echo '```markdown' >> $GITHUB_STEP_SUMMARY
+          head -10 ./release_artifacts/changelog.md >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-files-${{ steps.generate-release.outputs.tag }}
+          path: |
+            ./release_artifacts/output.env
+            ./release_artifacts/changelog.md
+          retention-days: 7
+
+  # Optional: Add a job to notify on success
+  notify-success:
+    runs-on: ubuntu-latest
+    needs: generate-release
+    if: always()
+    steps:
+      - name: Notify workflow completion
+        run: |
+          echo "Release generation workflow completed"
+          echo "Result: ${{ needs.generate-release.result }}"
+          # Add notification logic here (Slack, Discord, etc.)
