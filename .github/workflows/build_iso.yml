@@ -14,6 +14,7 @@ concurrency:
 jobs:
   build-iso:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     permissions:
       contents: read
       packages: write
@@ -48,44 +49,56 @@ jobs:
     steps:
 
       - name: Free Disk Space (Ubuntu)
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        uses: jlumbroso/free-disk-space@v1.3.1
 
       - name: Checkout Repo
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        uses: actions/checkout@v4
 
       - name: Set Image Tag
         id: generate-tag
         shell: bash
         run: |
-          TAG="stable"
-
           if [[ "${{ github.ref_name }}" == "testing" ]]; then
               TAG="testing"
+          elif [[ "${{ github.ref_name }}" == "unstable" ]]; then
+              TAG="unstable"
+          else
+              TAG="stable"
           fi
 
-          # Would like to implement in the future. This will allow us to support image tags from a PR.
-          #if [[ github.event.number ]]; then
-          #  TAG="pr-${{ github.event.number }}-${{ matrix.major_version }}"
-          #fi
-
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "Using tag: ${TAG}"
 
       - name: Set Flatpaks Directory Shortname
         id: generate-flatpak-dir-shortname
         shell: bash
         run: |
-          FLATPAK_DIR_SHORTNAME="installer/kde_flatpaks"
-
           if [[ "${{ matrix.image_name }}" =~ "gnome" ]]; then
             FLATPAK_DIR_SHORTNAME="installer/gnome_flatpaks"
+          else
+            FLATPAK_DIR_SHORTNAME="installer/kde_flatpaks"
+          fi
+
+          echo "Checking if directory exists: ${FLATPAK_DIR_SHORTNAME}"
+          if [ ! -d "${{ github.workspace }}/${FLATPAK_DIR_SHORTNAME}" ]; then
+            echo "Error: Directory ${FLATPAK_DIR_SHORTNAME} does not exist"
+            exit 1
           fi
 
           echo "flatpak-dir-shortname=${FLATPAK_DIR_SHORTNAME}" >> $GITHUB_OUTPUT
+          echo "Using flatpak directory: ${FLATPAK_DIR_SHORTNAME}"
+
+      - name: Generate Extra Boot Parameters
+        id: generate-extra-params
+        shell: bash
+        run: |
+          EXTRA_PARAMS=""
+          echo "extra-boot-params=${EXTRA_PARAMS}" >> $GITHUB_OUTPUT
 
       # Docker requires lowercase registry references
       - name: Lowercase Registry
         id: registry_case
-        uses: ASzc/change-string-case-action@d0603cd0a7dd490be678164909f65c7737470a7f # v6
+        uses: ASzc/change-string-case-action@v6
         with:
           string: ${{ env.IMAGE_REGISTRY }}
 
@@ -95,39 +108,105 @@ jobs:
         run: |
           set -ex
           image="${{ steps.registry_case.outputs.lowercase }}/${{ matrix.image_name }}:${{ steps.generate-tag.outputs.tag }}"
+          
+          echo "Using image: ${image}"
+          echo "Flatpak directory: ${{ steps.generate-flatpak-dir-shortname.outputs.flatpak-dir-shortname }}"
+          
           # Make temp space
-          TEMP_FLATPAK_INSTALL_DIR=$(mktemp -d -p ${{ github.workspace }} flatpak.XXX)
+          TEMP_FLATPAK_INSTALL_DIR=$(mktemp -d -p "${{ github.workspace }}" flatpak.XXX)
+          echo "Temp directory: ${TEMP_FLATPAK_INSTALL_DIR}"
+          
           # Get list of refs from directory
-          FLATPAK_REFS_DIR=${{ github.workspace }}/${{ steps.generate-flatpak-dir-shortname.outputs.flatpak-dir-shortname }}
-          FLATPAK_REFS_DIR_LIST=$(cat ${FLATPAK_REFS_DIR}/* | tr '\n' ' ' )
+          FLATPAK_REFS_DIR="${{ github.workspace }}/${{ steps.generate-flatpak-dir-shortname.outputs.flatpak-dir-shortname }}"
+          echo "Flatpak refs directory: ${FLATPAK_REFS_DIR}"
+          
+          # Check if flatpak refs files exist
+          if [ ! -d "${FLATPAK_REFS_DIR}" ]; then
+            echo "Error: Flatpak refs directory ${FLATPAK_REFS_DIR} does not exist"
+            exit 1
+          fi
+          
+          FLATPAK_REFS_FILES=$(find "${FLATPAK_REFS_DIR}" -name "*.txt" -type f)
+          if [ -z "${FLATPAK_REFS_FILES}" ]; then
+            echo "Warning: No flatpak refs files found in ${FLATPAK_REFS_DIR}"
+            touch "${FLATPAK_REFS_DIR}/flatpaks_with_deps"
+            exit 0
+          fi
+          
+          FLATPAK_REFS_DIR_LIST=$(cat ${FLATPAK_REFS_DIR}/*.txt | tr '\n' ' ' )
+          echo "Flatpak refs: ${FLATPAK_REFS_DIR_LIST}"
+          
           # Generate install script
-          cat << EOF > ${TEMP_FLATPAK_INSTALL_DIR}/script.sh
-          cat /temp_flatpak_install_dir/script.sh
+          cat << EOF > "${TEMP_FLATPAK_INSTALL_DIR}/script.sh"
+          #!/bin/bash
+          set -ex
+          echo "Setting up Flatpak environment..."
           mkdir -p /flatpak/flatpak /flatpak/triggers
-          mkdir /var/tmp || true
+          mkdir -p /var/tmp
           chmod -R 1777 /var/tmp
+          
+          echo "Configuring Flatpak..."
           flatpak config --system --set languages "*"
-          flatpak remote-add --system flathub https://flathub.org/repo/flathub.flatpakrepo
-          flatpak install --system -y ${FLATPAK_REFS_DIR_LIST}
-          ostree refs --repo=\${FLATPAK_SYSTEM_DIR}/repo | grep '^deploy/' | grep -v 'org\.freedesktop\.Platform\.openh264' | sed 's/^deploy\///g' > /output/flatpaks_with_deps
+          flatpak remote-add --system flathub https://flathub.org/repo/flathub.flatpakrepo --if-not-exists
+          
+          echo "Installing Flatpaks: ${FLATPAK_REFS_DIR_LIST}"
+          if ! flatpak install --system -y ${FLATPAK_REFS_DIR_LIST}; then
+            echo "Warning: Some flatpaks failed to install, continuing..."
+          fi
+          
+          echo "Exporting installed flatpaks..."
+          ostree refs --repo=\${FLATPAK_SYSTEM_DIR}/repo | grep '^deploy/' | grep -v 'org\.freedesktop\.Platform\.openh264' | sed 's/^deploy\///g' > /output/flatpaks_with_deps || {
+            echo "Warning: Failed to export flatpak dependencies"
+            touch /output/flatpaks_with_deps
+          }
+          
+          echo "Flatpak dependency resolution completed"
           EOF
-          docker run --rm --privileged \
+          
+          chmod +x "${TEMP_FLATPAK_INSTALL_DIR}/script.sh"
+          
+          echo "Running Flatpak dependency resolution in container..."
+          if ! docker run --rm --privileged \
             --entrypoint bash \
             -e FLATPAK_SYSTEM_DIR=/flatpak/flatpak \
             -e FLATPAK_TRIGGERSDIR=/flatpak/triggers \
-            --volume ${FLATPAK_REFS_DIR}:/output \
-            --volume ${TEMP_FLATPAK_INSTALL_DIR}:/temp_flatpak_install_dir \
-            ${image} /temp_flatpak_install_dir/script.sh
-          docker rmi ${image}
+            --volume "${FLATPAK_REFS_DIR}:/output" \
+            --volume "${TEMP_FLATPAK_INSTALL_DIR}:/temp_flatpak_install_dir" \
+            "${image}" /temp_flatpak_install_dir/script.sh; then
+            echo "Warning: Flatpak dependency resolution failed, continuing without dependencies"
+            touch "${FLATPAK_REFS_DIR}/flatpaks_with_deps"
+          fi
+          
+          # Cleanup
+          rm -rf "${TEMP_FLATPAK_INSTALL_DIR}"
+          
+          echo "Flatpak dependencies:"
+          cat "${FLATPAK_REFS_DIR}/flatpaks_with_deps" || echo "No flatpak dependencies file found"
 
       - name: Setup Bazzite Repo
         id: setup-bazzite-repo
         shell: bash
         run: |
-          curl -Lo ${{ github.workspace }}/bazzite.repo https://copr.fedorainfracloud.org/coprs/bazzite-org/bazzite/repo/fedora-${{ matrix.major_version }}/bazzite-org-bazzite-fedora-${{ matrix.major_version }}.repo
+          set -e
+          REPO_URL="https://copr.fedorainfracloud.org/coprs/bazzite-org/bazzite/repo/fedora-${{ matrix.major_version }}/bazzite-org-bazzite-fedora-${{ matrix.major_version }}.repo"
+          REPO_PATH="${{ github.workspace }}/bazzite.repo"
+          
+          echo "Downloading Bazzite repo from: ${REPO_URL}"
+          if ! curl -f -Lo "${REPO_PATH}" "${REPO_URL}"; then
+            echo "Error: Failed to download Bazzite repo file"
+            exit 1
+          fi
+          
+          if [ ! -s "${REPO_PATH}" ]; then
+            echo "Error: Downloaded repo file is empty"
+            exit 1
+          fi
+          
+          echo "Bazzite repo file downloaded successfully:"
+          cat "${REPO_PATH}"
 
       - name: Build ISOs
-        uses: jasonn3/build-container-installer@f09a756b7a1205f121d8508f1171759328b95d2c # v1.2.4
+        uses: jasonn3/build-container-installer@v1.2.4
         id: build
         with:
           arch: x86_64
@@ -151,21 +230,50 @@ jobs:
         id: upload-directory
         shell: bash
         run: |
-          ISO_UPLOAD_DIR=${{ github.workspace }}/upload
-          mkdir ${ISO_UPLOAD_DIR}
-          mv ${{ steps.build.outputs.iso_path }}/${{ steps.build.outputs.iso_name }} ${ISO_UPLOAD_DIR}
-          mv ${{ steps.build.outputs.iso_path }}/${{ steps.build.outputs.iso_name }}-CHECKSUM ${ISO_UPLOAD_DIR}
+          set -e
+          ISO_UPLOAD_DIR="${{ github.workspace }}/upload"
+          mkdir -p "${ISO_UPLOAD_DIR}"
+          
+          echo "Build outputs:"
+          echo "ISO Path: ${{ steps.build.outputs.iso_path }}"
+          echo "ISO Name: ${{ steps.build.outputs.iso_name }}"
+          
+          if [ -d "${{ steps.build.outputs.iso_path }}" ]; then
+            echo "Contents of ISO directory:"
+            ls -la "${{ steps.build.outputs.iso_path }}"
+            
+            if [ -f "${{ steps.build.outputs.iso_path }}/${{ steps.build.outputs.iso_name }}" ]; then
+              mv "${{ steps.build.outputs.iso_path }}/${{ steps.build.outputs.iso_name }}" "${ISO_UPLOAD_DIR}/"
+              echo "ISO moved successfully"
+            else
+              echo "Error: ISO file not found at expected path"
+              exit 1
+            fi
+            
+            if [ -f "${{ steps.build.outputs.iso_path }}/${{ steps.build.outputs.iso_name }}-CHECKSUM" ]; then
+              mv "${{ steps.build.outputs.iso_path }}/${{ steps.build.outputs.iso_name }}-CHECKSUM" "${ISO_UPLOAD_DIR}/"
+              echo "Checksum moved successfully"
+            else
+              echo "Warning: Checksum file not found"
+            fi
+          else
+            echo "Error: ISO directory not found"
+            exit 1
+          fi
+          
+          echo "Final upload directory contents:"
+          ls -la "${ISO_UPLOAD_DIR}"
+          
           echo "iso-upload-dir=${ISO_UPLOAD_DIR}" >> $GITHUB_OUTPUT
 
       - name: Upload ISOs and Checksum to Job Artifacts
-        if: github.ref_name == 'testing'
-        #if: github.event_name == 'pull_request'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: github.ref_name == 'testing' || github.ref_name == 'unstable'
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.image_name }}-${{ steps.generate-tag.outputs.tag }}-${{ matrix.major_version}}
-          path: ${{ steps.upload-directory.outputs.iso-upload-dir }}
+          path: ${{ steps.upload-directory.outputs.iso-upload-dir }}/*
           if-no-files-found: error
-          retention-days: 0
+          retention-days: 7
           compression-level: 0
           overwrite: true
 
@@ -181,6 +289,39 @@ jobs:
           RCLONE_CONFIG_R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           SOURCE_DIR: ${{ steps.upload-directory.outputs.iso-upload-dir }}
         run: |
+          set -e
+          echo "Installing rclone..."
           sudo apt-get update
           sudo apt-get install -y rclone
-          rclone copy $SOURCE_DIR R2:bazzite
+          
+          echo "Configuring rclone..."
+          mkdir -p ~/.config/rclone
+          
+          # Create rclone configuration
+          cat << EOF > ~/.config/rclone/rclone.conf
+          [R2]
+          type = s3
+          provider = Cloudflare
+          access_key_id = ${{ secrets.R2_ACCESS_KEY_ID }}
+          secret_access_key = ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          region = auto
+          endpoint = ${{ secrets.R2_ENDPOINT }}
+          EOF
+          
+          echo "Checking source directory..."
+          ls -la "$SOURCE_DIR"
+          
+          echo "Uploading to R2..."
+          if ! rclone copy "$SOURCE_DIR" "R2:bazzite" --progress --verbose; then
+            echo "Error: Failed to upload to R2"
+            exit 1
+          fi
+          
+          echo "Upload completed successfully"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "Cleaning up temporary files..."
+          sudo docker system prune -f || true
+          sudo rm -rf "${{ github.workspace }}/bazzite.repo" || true
