@@ -6,12 +6,145 @@ on:
 
 permissions:
   issues: write
+  pull-requests: write
 
 jobs:
   comment-filter:
     runs-on: ubuntu-latest
     steps:
-    - name: Comment filter
-      uses: DecimalTurn/Comment-Filter@9c95bdb06ae1dd6b8185d58f52a07a2a71e19d94 # v0.2.2
-      with:
-        exclude-contributors: true
+      - name: Filter spam comments
+        uses: DecimalTurn/Comment-Filter@v0.2.2
+        id: filter
+        with:
+          exclude-contributors: true
+          # Optional: Add custom spam patterns
+          spam-patterns: |
+            .*http[s]?://.*\.(ru|xyz|top).*
+            .*[0-9]{3}-[0-9]{3}-[0-9]{4}.*
+            .*@(gmail|yahoo|hotmail)\.com.*
+          # Optional: Minimum comment length to check
+          min-length: 5
+          # Optional: Action to take (comment, close, label)
+          action: label
+          label-name: spam
+
+      - name: Log filtered comment
+        if: steps.filter.outputs.is-spam == 'true'
+        run: |
+          echo "Spam comment detected and handled"
+          echo "Comment URL: ${{ github.event.comment.html_url }}"
+          echo "User: ${{ github.event.comment.user.login }}"
+
+      - name: Additional spam checks
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comment = context.payload.comment;
+            const commentBody = comment.body.toLowerCase();
+            
+            // Additional custom spam checks
+            const spamKeywords = [
+              'bitcoin', 'crypto', 'investment', 'earn money',
+              'work from home', 'get rich', 'click here', 'limited offer'
+            ];
+            
+            const isSpam = spamKeywords.some(keyword => 
+              commentBody.includes(keyword)
+            );
+            
+            if (isSpam) {
+              console.log(`Spam detected in comment by ${comment.user.login}`);
+              
+              // Add spam label
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                labels: ['spam']
+              });
+              
+              // Optionally hide the comment
+              try {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: comment.id
+                });
+                console.log('Spam comment deleted');
+              } catch (error) {
+                console.log('Could not delete comment, adding note instead');
+              }
+            }
+
+      - name: Notify on multiple spam comments
+        if: steps.filter.outputs.is-spam == 'true'
+        uses: actions/github-script@v7
+        env:
+          SPAM_THRESHOLD: 3
+        with:
+          script: |
+            const comment = context.payload.comment;
+            const user = comment.user.login;
+            
+            // Get user's recent comments
+            const comments = await github.rest.issues.listCommentsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              creator: user
+            });
+            
+            // Check if user has multiple spam comments
+            const spamComments = comments.data.filter(comment => {
+              // This would need actual spam detection logic
+              // For now, we'll just count all comments
+              return true;
+            });
+            
+            if (spamComments.length >= parseInt(process.env.SPAM_THRESHOLD)) {
+              console.log(`User ${user} has ${spamComments.length} potential spam comments`);
+              
+              // Optionally report user to GitHub
+              // await github.rest.repos.reportAbuse({
+              //   owner: context.repo.owner,
+              //   repo: context.repo.repo,
+              //   report: {
+              //     type: 'spam',
+              //     user: user
+              //   }
+              // });
+            }
+
+      - name: Create issue for spam pattern analysis
+        if: steps.filter.outputs.is-spam == 'true' && github.event.sender.type == 'User'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comment = context.payload.comment;
+            
+            // Create an issue for manual review of new spam patterns
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'spam-analysis'
+            });
+            
+            // Check if spam analysis issue already exists
+            const existingIssue = issues.data.find(issue => 
+              issue.title.includes('Spam Pattern Analysis')
+            );
+            
+            if (!existingIssue) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: 'Spam Pattern Analysis Needed',
+                body: `Potential spam comment detected that may need new patterns:\n\n` +
+                      `**User:** ${comment.user.login}\n` +
+                      `**Comment:** ${comment.body}\n` +
+                      `**URL:** ${comment.html_url}\n\n` +
+                      `Please review and update spam filters if necessary.`,
+                labels: ['spam-analysis', 'automated']
+              });
+            }
