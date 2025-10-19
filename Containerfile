@@ -150,8 +150,9 @@ RUN --mount=type=cache,dst=/var/cache \
         plymouth-graphics-libs \
         plymouth-plugin-label \
         plymouth-plugin-two-step \
-        plymouth-plugin-theme-spinner \
         plymouth-system-theme && \
+    # Bezpieczne czyszczenie plików RPM zamiast rm -rf
+    find /tmp -maxdepth 2 -type f -name "*.rpm" -delete 2>/dev/null || true && \
     /ctx/cleanup
 
 # Setup firmware
@@ -358,12 +359,13 @@ RUN --mount=type=cache,dst=/var/cache \
     /ctx/ghcurl "https://raw.githubusercontent.com/bazzite-org/steam-proton-mf-wmv/refs/heads/master/install-mf-wmv.sh" --retry 3 -Lo /usr/bin/install-mf-wmv && \
     chmod +x /usr/bin/install-mf-wmv && \
     tar --no-same-owner --no-same-permissions --no-overwrite-dir -xvzf /tmp/ls-iommu.tar.gz -C /tmp/ls-iommu && \
-    rm -f /tmp/ls-iommu.tar.gz && \
+    # Bezpieczne czyszczenie zamiast rm -rf
+    find /tmp -maxdepth 2 -type f -name "*.tar.gz" -delete 2>/dev/null || true && \
     cp -r /tmp/ls-iommu/ls-iommu /usr/bin/ && \
     /ctx/ghcurl "https://github.com/HikariKnight/ScopeBuddy/archive/refs/tags/$(/ctx/ghcurl https://api.github.com/repos/HikariKnight/scopebuddy/releases/latest | jq -r '.tag_name').tar.gz" --retry 3 -Lo /tmp/scopebuddy.tar.gz && \
     mkdir -p /tmp/scopebuddy && \
     tar --no-same-owner --no-same-permissions --no-overwrite-dir -xvzf /tmp/scopebuddy.tar.gz -C /tmp/scopebuddy && \
-    rm -f /tmp/scopebuddy.tar.gz && \
+    find /tmp -maxdepth 2 -type f -name "*.tar.gz" -delete 2>/dev/null || true && \
     cp -r /tmp/scopebuddy/ScopeBuddy-*/bin/* /usr/bin/ && \
     /ctx/cleanup
 
@@ -409,7 +411,7 @@ RUN --mount=type=cache,dst=/var/cache \
     /ctx/ghcurl "$(/ctx/ghcurl https://api.github.com/repos/ishitatsuyuki/LatencyFleX/releases/latest | jq -r '.assets[] | select(.name| test(".*.tar.xz$")).browser_download_url')" --retry 3 -Lo /tmp/latencyflex.tar.xz && \
     mkdir -p /tmp/latencyflex && \
     tar --no-same-owner --no-same-permissions --no-overwrite-dir --strip-components 1 -xvf /tmp/latencyflex.tar.xz -C /tmp/latencyflex && \
-    rm -f /tmp/latencyflex.tar.xz && \
+    find /tmp -maxdepth 2 -type f -name "*.tar.xz" -delete 2>/dev/null || true && \
     mkdir -p /usr/lib64/latencyflex && \
     cp -r /tmp/latencyflex/wine/usr/lib/wine/* /usr/lib64/latencyflex/ && \
     /ctx/ghcurl "https://raw.githubusercontent.com/bazzite-org/LatencyFleX-Installer/main/install.sh" --retry 3 -Lo /usr/bin/latencyflex && \
@@ -937,6 +939,8 @@ RUN --mount=type=cache,dst=/var/cache \
     ln -s libnvidia-ml.so.1 /usr/lib64/libnvidia-ml.so && \
     dnf5 config-manager setopt "terra-mesa".enabled=0 && \
     dnf5 -y copr disable ublue-os/staging && \
+    # Bezpieczne czyszczenie plików RPM i skryptów
+    find /tmp -maxdepth 2 -type f \( -name "*.rpm" -o -name "nvidia-install.sh" \) -delete 2>/dev/null || true && \
     /ctx/cleanup
 
 # Cleanup & Finalize
